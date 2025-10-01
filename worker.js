@@ -4,11 +4,15 @@ const SECRET = ENV_BOT_SECRET // A-Z, a-z, 0-9, _ and -
 const ADMIN_UID = ENV_ADMIN_UID // your user id, get it from https://t.me/username_to_id_bot
 
 const NOTIFY_INTERVAL = 3600 * 1000;
-const fraudDb = 'https://raw.githubusercontent.com/LloydAsp/nfd/main/data/fraud.db';
-const notificationUrl = 'https://raw.githubusercontent.com/LloydAsp/nfd/main/data/notification.txt'
-const startMsgUrl = 'https://raw.githubusercontent.com/LloydAsp/nfd/main/data/startMessage.md';
+const RATE_LIMIT_COUNT = 5; // 5 messages
+const RATE_LIMIT_WINDOW = 10 * 1000; // 10 seconds
+
+// 硬编码的启动消息和通知消息
+const START_MSG = "Ciallo～(∠・ω< )⌒☆发送消息来与我联系~";
+const NOTIFICATION_MSG = "新用户消息通知";
 
 const enable_notification = true
+
 /**
  * Return url to telegram api, optionally with parameters added
  */
@@ -97,10 +101,9 @@ async function onUpdate (update) {
  */
 async function onMessage (message) {
   if(message.text === '/start'){
-    let startMsg = await fetch(startMsgUrl).then(r => r.text())
     return sendMessage({
       chat_id:message.chat.id,
-      text:startMsg,
+      text: START_MSG,
     })
   }
   if(message.chat.id.toString() === ADMIN_UID){
@@ -119,7 +122,7 @@ async function onMessage (message) {
     if(/^\/checkblock$/.exec(message.text)){
       return checkBlock(message)
     }
-    let guestChantId = await nfd.get('msg-map-' + message?.reply_to_message.message_id,
+    let guestChantId = await env.forwardConfig.get('msg-map-' + message?.reply_to_message.message_id,
                                       { type: "json" })
     return copyMessage({
       chat_id: guestChantId,
@@ -130,14 +133,60 @@ async function onMessage (message) {
   return handleGuestMessage(message)
 }
 
+/**
+ * 检查用户消息频率并自动屏蔽
+ */
+async function checkRateLimit(chatId) {
+  const now = Date.now();
+  const key = `rate-limit-${chatId}`;
+  
+  // 获取用户的消息时间记录
+  let userMessages = await env.forwardConfig.get(key, { type: "json" });
+  if (!userMessages) {
+    userMessages = [];
+  }
+  
+  // 过滤掉10秒外的时间记录
+  const recentMessages = userMessages.filter(timestamp => 
+    now - timestamp <= RATE_LIMIT_WINDOW
+  );
+  
+  // 检查是否超过限制
+  if (recentMessages.length >= RATE_LIMIT_COUNT) {
+    // 自动屏蔽用户
+    await env.forwardConfig.put(`isblocked-${chatId}`, true);
+    return true; // 超过频率限制
+  }
+  
+  // 添加当前时间戳并更新记录
+  recentMessages.push(now);
+  await env.forwardConfig.put(key, JSON.stringify(recentMessages));
+  
+  return false; // 未超过限制
+}
+
 async function handleGuestMessage(message){
   let chatId = message.chat.id;
-  let isblocked = await nfd.get('isblocked-' + chatId, { type: "json" })
+  let isblocked = await env.forwardConfig.get('isblocked-' + chatId, { type: "json" })
   
   if(isblocked){
     return sendMessage({
       chat_id: chatId,
       text:'Your are blocked'
+    })
+  }
+
+  // 检查消息频率
+  const isRateLimited = await checkRateLimit(chatId);
+  if (isRateLimited) {
+    // 通知管理员用户因频率过高被屏蔽
+    await sendMessage({
+      chat_id: ADMIN_UID,
+      text: `用户 ${chatId} 因消息频率过高已被自动屏蔽`
+    });
+    return sendMessage({
+      chat_id: chatId,
+      text: '由于消息频率过高，您已被暂时屏蔽'
     })
   }
 
@@ -148,35 +197,28 @@ async function handleGuestMessage(message){
   })
   console.log(JSON.stringify(forwardReq))
   if(forwardReq.ok){
-    await nfd.put('msg-map-' + forwardReq.result.message_id, chatId)
+    await env.forwardConfig.put('msg-map-' + forwardReq.result.message_id, chatId)
   }
   return handleNotify(message)
 }
 
 async function handleNotify(message){
-  // 先判断是否是诈骗人员，如果是，则直接提醒
-  // 如果不是，则根据时间间隔提醒：用户id，交易注意点等
   let chatId = message.chat.id;
-  if(await isFraud(chatId)){
-    return sendMessage({
-      chat_id: ADMIN_UID,
-      text:`检测到骗子，UID${chatId}`
-    })
-  }
+  
   if(enable_notification){
-    let lastMsgTime = await nfd.get('lastmsg-' + chatId, { type: "json" })
+    let lastMsgTime = await env.forwardConfig.get('lastmsg-' + chatId, { type: "json" })
     if(!lastMsgTime || Date.now() - lastMsgTime > NOTIFY_INTERVAL){
-      await nfd.put('lastmsg-' + chatId, Date.now())
+      await env.forwardConfig.put('lastmsg-' + chatId, Date.now())
       return sendMessage({
         chat_id: ADMIN_UID,
-        text:await fetch(notificationUrl).then(r => r.text())
+        text: NOTIFICATION_MSG
       })
     }
   }
 }
 
 async function handleBlock(message){
-  let guestChantId = await nfd.get('msg-map-' + message.reply_to_message.message_id,
+  let guestChantId = await env.forwardConfig.get('msg-map-' + message.reply_to_message.message_id,
                                       { type: "json" })
   if(guestChantId === ADMIN_UID){
     return sendMessage({
@@ -184,7 +226,7 @@ async function handleBlock(message){
       text:'不能屏蔽自己'
     })
   }
-  await nfd.put('isblocked-' + guestChantId, true)
+  await env.forwardConfig.put('isblocked-' + guestChantId, true)
 
   return sendMessage({
     chat_id: ADMIN_UID,
@@ -193,10 +235,10 @@ async function handleBlock(message){
 }
 
 async function handleUnBlock(message){
-  let guestChantId = await nfd.get('msg-map-' + message.reply_to_message.message_id,
+  let guestChantId = await env.forwardConfig.get('msg-map-' + message.reply_to_message.message_id,
   { type: "json" })
 
-  await nfd.put('isblocked-' + guestChantId, false)
+  await env.forwardConfig.put('isblocked-' + guestChantId, false)
 
   return sendMessage({
     chat_id: ADMIN_UID,
@@ -205,9 +247,9 @@ async function handleUnBlock(message){
 }
 
 async function checkBlock(message){
-  let guestChantId = await nfd.get('msg-map-' + message.reply_to_message.message_id,
+  let guestChantId = await env.forwardConfig.get('msg-map-' + message.reply_to_message.message_id,
   { type: "json" })
-  let blocked = await nfd.get('isblocked-' + guestChantId, { type: "json" })
+  let blocked = await env.forwardConfig.get('isblocked-' + guestChantId, { type: "json" })
 
   return sendMessage({
     chat_id: ADMIN_UID,
@@ -244,14 +286,4 @@ async function registerWebhook (event, requestUrl, suffix, secret) {
 async function unRegisterWebhook (event) {
   const r = await (await fetch(apiUrl('setWebhook', { url: '' }))).json()
   return new Response('ok' in r && r.ok ? 'Ok' : JSON.stringify(r, null, 2))
-}
-
-async function isFraud(id){
-  id = id.toString()
-  let db = await fetch(fraudDb).then(r => r.text())
-  let arr = db.split('\n').filter(v => v)
-  console.log(JSON.stringify(arr))
-  let flag = arr.filter(v => v === id).length !== 0
-  console.log(flag)
-  return flag
 }
