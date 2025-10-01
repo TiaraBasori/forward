@@ -8,7 +8,7 @@ const RATE_LIMIT_COUNT = 5; // 5 messages
 const RATE_LIMIT_WINDOW = 10 * 1000; // 10 seconds
 
 // 硬编码的启动消息和通知消息
-const START_MSG = "Ciallo～(∠・ω< )⌒☆发送消息来与我联系~";
+const START_MSG = "Ciallo～(∠・ω< )⌒☆\n请发送消息来与我联系哦~\nJust send your message to the bot.";
 const NOTIFICATION_MSG = "新用户消息通知";
 
 const enable_notification = true
